@@ -1,0 +1,59 @@
+name: Production monitor
+
+on:
+  schedule:
+    - cron: '3-58/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      test-alert:
+        description: Send a test alert to the operator
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-monitor
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    # A separate runner still reports failure if the VPS or the Telegram gateway is down.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout trusted monitor
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Restore alert cooldown
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /tmp/openlearn-monitor-state.json
+          key: production-monitor-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: production-monitor-state-
+      - name: Check process, database and paid admission through the public site
+        id: probe
+        env:
+          PRODUCTION_MONITOR_BASE_URL: https://open-learn.ai
+          TELEGRAM_API_BASE_URL: ${{ vars.MONITOR_TELEGRAM_API_BASE_URL }}
+          MONITOR_BOT_TOKEN: ${{ secrets.MONITOR_BOT_TOKEN }}
+          MONITOR_CHAT_ID: ${{ secrets.MONITOR_CHAT_ID }}
+          MONITOR_TEST_ALERT: ${{ inputs.test-alert && 'true' || 'false' }}
+        run: python3 scripts/production_probe.py
+      - name: Save delivered alert state
+        if: always() && steps.probe.outputs.state_changed == 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /tmp/openlearn-monitor-state.json
+          key: production-monitor-state-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Record incident instructions
+        if: failure()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          Production availability or Deploy failed. Check the failed probe and Deploy logs.
+          Inspect release_drain status and reconcile unknown paid/provider outcomes before owner-only resume.
+          This monitor runs outside the VPS and sends alerts directly to Telegram.
+          If delivery failed, inspect the monitor secrets and the independent Telegram API URL.
+          EOF
