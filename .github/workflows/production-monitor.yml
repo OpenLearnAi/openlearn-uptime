@@ -3,6 +3,7 @@ name: Production monitor
 on:
   schedule:
     - cron: '3-58/5 * * * *'
+    - cron: '17 6 * * *'
   workflow_dispatch:
     inputs:
       test-alert:
@@ -20,6 +21,7 @@ concurrency:
 jobs:
   probe:
     # A separate runner still reports failure if the VPS or the Telegram gateway is down.
+    if: github.event_name != 'schedule' || github.event.schedule == '3-58/5 * * * *'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -57,3 +59,40 @@ jobs:
           This monitor runs outside the VPS and sends alerts directly to Telegram.
           If delivery failed, inspect the monitor secrets and the independent Telegram API URL.
           EOF
+
+  activity:
+    # Public schedules stop after 60 inactive days; retain a 30-day margin.
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '17 6 * * *'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout trusted monitor
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Refresh repository activity without changing files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          monitor_last=$(git log -1 --format=%ct)
+          monitor_now=$(date +%s)
+          if [ "$GITHUB_EVENT_NAME" != workflow_dispatch ] && [ "$((monitor_now - monitor_last))" -lt 2592000 ]; then
+            exit 0
+          fi
+          monitor_head=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          monitor_tree=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$monitor_head" --jq .tree.sha)
+          monitor_commit=$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/commits" \
+            -f message='Keep availability checks active' -f tree="$monitor_tree" -f "parents[]=$monitor_head" --jq .sha)
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$monitor_commit" --jq .tree.sha)" = "$monitor_tree"
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/main" -f sha="$monitor_commit" -F force=false >/dev/null
+      - name: Report activity maintenance failure
+        if: failure()
+        env:
+          TELEGRAM_API_BASE_URL: ${{ vars.MONITOR_TELEGRAM_API_BASE_URL }}
+          MONITOR_BOT_TOKEN: ${{ secrets.MONITOR_BOT_TOKEN }}
+          MONITOR_CHAT_ID: ${{ secrets.MONITOR_CHAT_ID }}
+        run: |
+          python3 -c 'from scripts.production_probe import notify; notify("OpenLearn: не удалось поддержать активность внешнего монитора. Проверьте activity job в openlearn-uptime, чтобы GitHub не отключил расписание.")'
