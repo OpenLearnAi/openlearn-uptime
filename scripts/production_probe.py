@@ -10,6 +10,8 @@ from pathlib import Path
 
 
 def notify(message: str) -> None:
+    if source := os.environ.get("MONITOR_SOURCE"):
+        message = f"[{source}]\n{message}"
     base = os.environ["TELEGRAM_API_BASE_URL"].rstrip("/")
     if not base.startswith("https://"):
         raise ValueError("Telegram alert transport requires HTTPS")
@@ -91,7 +93,9 @@ def main() -> int:
     except Exception as exc:
         print(f"Alert delivery/state failed: {type(exc).__name__}")
         return 1
-    return int(bool(errors or failed_deploy))
+    failed = bool(errors or failed_deploy)
+    print("Production incident detected" if failed else "Production probes passed", flush=True)
+    return int(failed)
 
 
 if __name__ == "__main__":
