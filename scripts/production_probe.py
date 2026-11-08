@@ -47,7 +47,9 @@ def report(incident: str) -> None:
                "Результат релиза проверяйте отдельно в Deploy.")
         changed = True
     if changed:
-        path.write_text(json.dumps({"incident": incident, "sent_at": now}))
+        state = {"incident": incident, "sent_at": now}
+    state["checked_at"] = now
+    path.write_text(json.dumps(state))
     output = os.environ.get("GITHUB_OUTPUT")
     if output:
         with open(output, "a") as stream:
